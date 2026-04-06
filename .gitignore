@@ -1,0 +1,23 @@
+# Build output
+obamaficator
+*.exe
+*.o
+*.dSYM/
+
+# Generated video
+*.mp4
+*.gif
+
+# Generated images (keep folder via .gitkeep)
+images/*
+!images/.gitkeep
+
+# Animation frames (keep folder via .gitkeep)
+frames/*
+!frames/.gitkeep
+
+# VS Code
+.vscode/
+
+# macOS
+.DS_Store
