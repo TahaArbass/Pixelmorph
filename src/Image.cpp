@@ -3,13 +3,12 @@
 #include "../include/stb_image/stb_image.h"
 #define STB_IMAGE_WRITE_IMPLEMENTATION
 #include "../include/stb_image/stb_image_write.h"
-#include <algorithm>
-#include <cfloat>
+#define STB_IMAGE_RESIZE2_IMPLEMENTATION
+#include "../include/stb_image/stb_image_resize2.h"
 #include <cmath>
 #include <cstring>
-#include <sys/stat.h>
 #include <stdexcept>
-#include <vector>
+#include <sys/stat.h>
 
 Image::Image(string fname) : fname(fname), allocationType(STB_ALLOCATED) {
   data = stbi_load(fname.c_str(), &width, &height, &channels, 0);
@@ -52,9 +51,12 @@ Image *Image::toSepia() {
 
   for (uint8_t *p = data, *pg = sepiaImg; p != data + size;
        p += channels, pg += channels) {
-    *pg     = (uint8_t)fmin(0.393 * *p + 0.769 * *(p + 1) + 0.189 * *(p + 2), 255.0); // R
-    *(pg+1) = (uint8_t)fmin(0.349 * *p + 0.686 * *(p + 1) + 0.168 * *(p + 2), 255.0); // G
-    *(pg+2) = (uint8_t)fmin(0.272 * *p + 0.534 * *(p + 1) + 0.131 * *(p + 2), 255.0); // B
+    *pg = (uint8_t)fmin(0.393 * *p + 0.769 * *(p + 1) + 0.189 * *(p + 2),
+                        255.0); // R
+    *(pg + 1) = (uint8_t)fmin(0.349 * *p + 0.686 * *(p + 1) + 0.168 * *(p + 2),
+                              255.0); // G
+    *(pg + 2) = (uint8_t)fmin(0.272 * *p + 0.534 * *(p + 1) + 0.131 * *(p + 2),
+                              255.0); // B
     if (channels == 4) {
       *(pg + 3) = *(p + 3);
     }
@@ -76,170 +78,61 @@ static bool cmpLum(const PixelEntry &a, const PixelEntry &b) {
   return a.lum < b.lum;
 }
 
-// Returns perm where perm[srcPixelIdx] = tgtPixelIdx
-std::vector<int> Image::permFast(Image *target) {
-  int n = width * height;
-  std::vector<PixelEntry> srcPx(n), tgtPx(n);
-  for (int i = 0; i < n; i++) {
-    srcPx[i] = {luminance(data + i * channels), i};
-    tgtPx[i] = {luminance(target->data + i * target->channels), i};
-  }
-  std::sort(srcPx.begin(), srcPx.end(), cmpLum);
-  std::sort(tgtPx.begin(), tgtPx.end(), cmpLum);
+Image *Image::resizeTo(int newWidth, int newHeight) {
+  uint8_t *newData = new uint8_t[newWidth * newHeight * channels];
 
-  std::vector<int> perm(n);
-  for (int i = 0; i < n; i++)
-    perm[srcPx[i].idx] = tgtPx[i].idx;
-  return perm;
-}
-
-std::vector<int> Image::permOptimized(Image *target, int blockSize) {
-  int blocksX = (width  + blockSize - 1) / blockSize;
-  int blocksY = (height + blockSize - 1) / blockSize;
-  int numBlocks = blocksX * blocksY;
-
-  struct BlockAvg { float r, g, b; };
-  std::vector<BlockAvg> srcAvg(numBlocks, {0,0,0});
-  std::vector<BlockAvg> tgtAvg(numBlocks, {0,0,0});
-  std::vector<int>      blockCount(numBlocks, 0);
-
-  for (int by = 0; by < blocksY; by++) {
-    for (int bx = 0; bx < blocksX; bx++) {
-      int bidx = by * blocksX + bx;
-      int xEnd = std::min((bx + 1) * blockSize, width);
-      int yEnd = std::min((by + 1) * blockSize, height);
-      for (int y = by * blockSize; y < yEnd; y++) {
-        for (int x = bx * blockSize; x < xEnd; x++) {
-          uint8_t *sp = data         + (y * width + x) * channels;
-          uint8_t *tp = target->data + (y * width + x) * target->channels;
-          srcAvg[bidx].r += sp[0]; srcAvg[bidx].g += sp[1]; srcAvg[bidx].b += sp[2];
-          tgtAvg[bidx].r += tp[0]; tgtAvg[bidx].g += tp[1]; tgtAvg[bidx].b += tp[2];
-          blockCount[bidx]++;
-        }
-      }
-      float cnt = (float)blockCount[bidx];
-      srcAvg[bidx].r /= cnt; srcAvg[bidx].g /= cnt; srcAvg[bidx].b /= cnt;
-      tgtAvg[bidx].r /= cnt; tgtAvg[bidx].g /= cnt; tgtAvg[bidx].b /= cnt;
-    }
+  // Map our channel count to stb's pixel layout
+  stbir_pixel_layout layout;
+  switch (channels) {
+  case 1:
+    layout = STBIR_1CHANNEL;
+    break; // STBIR_GREY if it exists
+  case 2:
+    layout = STBIR_2CHANNEL;
+    break; // Grey + Alpha
+  case 3:
+    layout = STBIR_RGB;
+    break;
+  case 4:
+    layout = STBIR_RGBA;
+    break;
+  default:
+    delete[] newData;
+    throw std::runtime_error("Unsupported number of channels");
   }
 
-  std::vector<int>  blockMap(numBlocks, -1);
-  std::vector<bool> tgtUsed(numBlocks, false);
-  for (int i = 0; i < numBlocks; i++) {
-    float bestDist = FLT_MAX; int bestJ = -1;
-    for (int j = 0; j < numBlocks; j++) {
-      if (tgtUsed[j]) continue;
-      float dr = srcAvg[i].r - tgtAvg[j].r;
-      float dg = srcAvg[i].g - tgtAvg[j].g;
-      float db = srcAvg[i].b - tgtAvg[j].b;
-      float d  = dr*dr + dg*dg + db*db;
-      if (d < bestDist) { bestDist = d; bestJ = j; }
-    }
-    blockMap[i] = bestJ;
-    tgtUsed[bestJ] = true;
+  // For images, you usually want the sRGB variant because most photos
+  // are in sRGB color space and it handles gamma correctly
+  unsigned char *result = stbir_resize_uint8_srgb(
+      data,      // Input pixels
+      width,     // Input width
+      height,    // Input height
+      0,         // Input stride (0 = tightly packed, same as width * channels)
+      newData,   // Output pixels
+      newWidth,  // Output width
+      newHeight, // Output height
+      0,         // Output stride (0 = tightly packed)
+      layout     // Pixel layout
+  );
+
+  if (result == nullptr) {
+    delete[] newData;
+    throw std::runtime_error("Failed to resize image");
   }
 
-  int n = width * height;
-  std::vector<int> perm(n);
-  for (int i = 0; i < numBlocks; i++) {
-    int j   = blockMap[i];
-    int sby = (i / blocksX) * blockSize, sbx = (i % blocksX) * blockSize;
-    int tby = (j / blocksX) * blockSize, tbx = (j % blocksX) * blockSize;
-    int sxEnd = std::min(sbx + blockSize, width),  syEnd = std::min(sby + blockSize, height);
-    int txEnd = std::min(tbx + blockSize, width),  tyEnd = std::min(tby + blockSize, height);
-
-    std::vector<PixelEntry> sp, tp;
-    sp.reserve(blockSize * blockSize);
-    tp.reserve(blockSize * blockSize);
-    for (int y = sby; y < syEnd; y++)
-      for (int x = sbx; x < sxEnd; x++)
-        sp.push_back({luminance(data + (y * width + x) * channels), y * width + x});
-    for (int y = tby; y < tyEnd; y++)
-      for (int x = tbx; x < txEnd; x++)
-        tp.push_back({luminance(target->data + (y * width + x) * target->channels), y * width + x});
-
-    std::sort(sp.begin(), sp.end(), cmpLum);
-    std::sort(tp.begin(), tp.end(), cmpLum);
-
-    int count = (int)std::min(sp.size(), tp.size());
-    for (int k = 0; k < count; k++)
-      perm[sp[k].idx] = tp[k].idx;
-  }
-  return perm;
-}
-
-// Apply a permutation: place src pixel i at tgt position perm[i]
-Image *Image::applyPerm(Image *src, const std::vector<int> &perm) {
-  int n = src->width * src->height;
-  uint8_t *out = new uint8_t[src->size];
-  for (int i = 0; i < n; i++)
-    memcpy(out + perm[i] * src->channels, src->data + i * src->channels, src->channels);
-  return new Image(out, src->width, src->height, src->channels);
-}
-
-Image *Image::remapFast(Image *target) {
-  if (width != target->width || height != target->height)
-    throw std::runtime_error("remapFast: images must be the same dimensions");
-  return applyPerm(this, permFast(target));
-}
-
-Image *Image::remapOptimized(Image *target, int blockSize) {
-  if (width != target->width || height != target->height)
-    throw std::runtime_error("remapOptimized: images must be the same dimensions");
-  return applyPerm(this, permOptimized(target, blockSize));
-}
-
-// Smoothstep easing: slow start, fast middle, slow end
-static inline float ease(float t) { return t * t * (3.0f - 2.0f * t); }
-
-void Image::generateFrames(Image *target, int numFrames, string outDir,
-                            bool fast, int blockSize) {
-  if (width != target->width || height != target->height)
-    throw std::runtime_error("generateFrames: images must be the same dimensions");
-
-  mkdir(outDir.c_str(), 0755);
-
-  std::vector<int> perm = fast ? permFast(target) : permOptimized(target, blockSize);
-
-  int n = width * height;
-  // Precompute src and tgt (x,y) for each pixel
-  std::vector<int> srcX(n), srcY(n), tgtX(n), tgtY(n);
-  for (int i = 0; i < n; i++) {
-    srcX[i] = i % width;         srcY[i] = i / width;
-    tgtX[i] = perm[i] % width;   tgtY[i] = perm[i] / width;
-  }
-
-  uint8_t *frame = new uint8_t[size];
-  char fname[256];
-
-  for (int f = 0; f < numFrames; f++) {
-    float t = ease((float)f / (float)(numFrames - 1));
-
-    // Start from the src image so gaps are filled with original content
-    memcpy(frame, data, size);
-
-    for (int i = 0; i < n; i++) {
-      int x = (int)(srcX[i] + t * (tgtX[i] - srcX[i]) + 0.5f);
-      int y = (int)(srcY[i] + t * (tgtY[i] - srcY[i]) + 0.5f);
-      x = std::max(0, std::min(width  - 1, x));
-      y = std::max(0, std::min(height - 1, y));
-      memcpy(frame + (y * width + x) * channels, data + i * channels, channels);
-    }
-
-    snprintf(fname, sizeof(fname), "%s/frame_%03d.png", outDir.c_str(), f);
-    stbi_write_png(fname, width, height, channels, frame, width * channels);
-  }
-
-  delete[] frame;
+  // stbir_resize_uint8_srgb returns the output buffer pointer on success
+  return new Image(newData, newWidth, newHeight, channels);
 }
 
 void Image::saveImage(ImageExtension ext, string outFname) {
   if (outFname.empty()) {
-    string base = fname.empty() ? "output" : fname.substr(0, fname.find_last_of('.'));
+    string base =
+        fname.empty() ? "output" : fname.substr(0, fname.find_last_of('.'));
     outFname = base + (ext == PNG ? ".png" : ".jpg");
   }
   if (ext == PNG) {
-    stbi_write_png(outFname.c_str(), width, height, channels, data, width * channels);
+    stbi_write_png(outFname.c_str(), width, height, channels, data,
+                   width * channels);
   } else {
     stbi_write_jpg(outFname.c_str(), width, height, channels, data, 90);
   }

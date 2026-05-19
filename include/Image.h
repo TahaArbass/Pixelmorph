@@ -34,16 +34,6 @@ public:
   Image *toSepia();
   void saveImage(ImageExtension ext, string outFname = "");
 
-  // Remap: reorder src pixels to match target's structure.
-  // Both images must be the same dimensions.
-  // Only pixel positions change — colors are preserved exactly.
-  Image *remapFast(Image *target);                          // O(n log n) luminance sort
-  Image *remapOptimized(Image *target, int blockSize = 16); // block match + per-block sort
-
-  // Generate animation frames showing pixels moving from this image to target.
-  // Frames are saved as outDir/frame_000.png ... frame_NNN.png.
-  // Run: ffmpeg -framerate 30 -i outDir/frame_%03d.png output.gif
-  void generateFrames(Image *target, int numFrames = 60, string outDir = "./frames",
-                      bool fast = true, int blockSize = 16);
+  Image *resizeTo(int newWidth, int newHeight);
 };
 #endif
